@@ -1,7 +1,9 @@
 """
-Lightweight token utilities shared across all context-guard extensions.
-Uses A0's own `helpers.tokens.approximate_tokens` so estimates stay consistent
-with what the rest of the framework reports.
+Lightweight token utilities for _a0_context_guard.
+Uses A0's own history.get_tokens() / helpers.tokens so estimates stay
+consistent with what the rest of the framework reports.
+
+Imported as: from plugins._a0_context_guard.helpers.token_utils import ...
 """
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -15,7 +17,6 @@ def history_token_count(agent: "Agent") -> int:
     try:
         return agent.history.get_tokens()
     except Exception:
-        # fallback: serialise and count
         try:
             from helpers import tokens
             from helpers.history import output_text
@@ -34,4 +35,4 @@ def ctx_budget_tokens(agent: "Agent") -> int:
         ctx_history = float(cfg.get("ctx_history", 0.70))
         return int(ctx_length * ctx_history)
     except Exception:
-        return 89600  # 128k * 0.70 safe fallback
+        return 89600  # 128 000 * 0.70 safe fallback

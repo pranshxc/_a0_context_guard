@@ -1,37 +1,40 @@
 """
-hist_add_tool_result  →  _10_result_size_cap
+hist_add_tool_result  ->  _10_result_size_cap
 
 Fires BEFORE a tool result is written into agent history.
-Truncates oversized results to MAX_RESULT_CHARS while preserving the most
-valuable part (the beginning) and appending a transparent audit marker.
+Truncates oversized results to max_result_chars while preserving the most
+valuable leading content and appending a transparent audit marker so the
+agent knows exactly what happened.
 
 Design goals
-────────────
-• Never silently drop data — always append a [TRUNCATED] marker with byte count.
-• Preserve structured openings: if the result looks like JSON or XML, keep the
-  first structural lines intact so the agent knows the schema even after trim.
-• Zero latency — pure string operation, no LLM calls.
-• Fault-tolerant — any exception is swallowed; the original result passes through.
+------------
+- Zero latency: pure string operation, no LLM call.
+- Never silently drop data: always append [CONTEXT-GUARD] marker with byte count.
+- Best-effort JSON bracket closing so the agent sees valid structure.
+- Full fault-tolerance: any exception is swallowed; original result passes through.
+
+Import pattern: extension files inside a plugin MUST import plugin-local
+helpers using the full dotted path  plugins.<plugin_name>.helpers.*
+because Python resolves bare `from helpers.x` against A0's own helpers/ pkg.
 """
 from __future__ import annotations
 import json
 from typing import Any
 from helpers.extension import Extension
 
-# lazy import so the plugin is importable before agent0 is fully booted
-def _cfg():
+
+def _get_cfg():
+    """Lazy-load plugin config; return a no-op getter on failure."""
     try:
-        from helpers.config import get  # local to plugin dir
+        from plugins._a0_context_guard.helpers.config import get
         return get
-    except ImportError:
+    except Exception:
         import os
         return lambda k, d=None: os.environ.get(f"CTX_GUARD_{k.upper()}", d)
 
 
 class ResultSizeCap(Extension):
-    """
-    Caps every incoming tool result at `max_result_chars` characters.
-    """
+    """Caps every incoming tool result at `max_result_chars` characters."""
 
     def execute(self, data: dict[str, Any] | None = None, **kwargs):  # type: ignore[override]
         if not self.agent:
@@ -40,52 +43,49 @@ class ResultSizeCap(Extension):
             return
 
         try:
-            cfg = _cfg()
+            cfg = _get_cfg()
             if not cfg("enabled", True):
                 return
 
-            max_chars: int = int(cfg("max_result_chars", 4000))
-            max_chars = max(500, max_chars)  # floor safety
+            max_chars: int = max(500, int(cfg("max_result_chars", 4000)))
 
             result = data.get("tool_result")
             if result is None:
                 return
 
-            result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+            result_str = (
+                result if isinstance(result, str)
+                else json.dumps(result, ensure_ascii=False)
+            )
 
             if len(result_str) <= max_chars:
-                return  # within budget — do nothing
+                return  # within budget - nothing to do
 
             omitted = len(result_str) - max_chars
-            truncated = result_str[:max_chars]
-
-            # Attempt to close any open JSON bracket so the agent doesn't see
-            # malformed JSON that could confuse parsing.
-            truncated = _try_close_json(truncated)
+            truncated = _try_close_json(result_str[:max_chars])
 
             marker = (
-                f"\n\n[CONTEXT-GUARD: {omitted:,} characters truncated to save context window.\n"
-                f" Full result saved to disk if file-save extension is active.\n"
-                f" The leading {max_chars:,} characters above contain the most relevant content.]"
+                f"\n\n[CONTEXT-GUARD: {omitted:,} characters truncated to save "
+                f"context window. The {max_chars:,} leading characters above contain "
+                f"the most relevant content. Full result saved to disk if the "
+                f"file-save extension is active.]"
             )
             data["tool_result"] = truncated + marker
 
         except Exception:
-            # Never crash the agent — silently pass through original data
-            pass
+            pass  # never crash the agent
 
 
 def _try_close_json(text: str) -> str:
-    """Best-effort: if text looks like JSON, try to close open brackets."""
+    """Best-effort: close open JSON brackets so output stays parseable."""
     stripped = text.strip()
     if not stripped or stripped[0] not in ("{", "["):
-        return text  # not JSON — return as-is
-    open_curly = stripped.count("{") - stripped.count("}")
+        return text
+    open_curly  = stripped.count("{") - stripped.count("}")
     open_square = stripped.count("[") - stripped.count("]")
     if open_curly <= 0 and open_square <= 0:
-        return text  # already balanced
-    # Close in reverse order of expected nesting
-    closer = "" 
+        return text
+    closer = ""
     if open_square > 0:
         closer += "]" * min(open_square, 5)
     if open_curly > 0:
