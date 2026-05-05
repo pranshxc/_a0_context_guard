@@ -1,0 +1,16 @@
+name: _a0_context_guard
+version: 1.0.0
+description: >
+  Automatically stabilises input token usage during long autonomous agent runs.
+  Three coordinated, zero-config hooks work together:
+    1. hist_add_tool_result  — caps every incoming tool result at MAX_RESULT_CHARS
+       before it enters history, preventing single large outputs from bloating context.
+    2. message_loop_start    — after each loop iteration checks if history is over the
+       model's configured ctx_history budget and triggers A0's native compress() pipeline
+       (no extra LLM calls, purely local compression of old topics/bulks).
+    3. monologue_end         — if tokens are still above HARD_COMPACT_THRESHOLD after
+       native compression, triggers the _chat_compaction plugin's full LLM summarisation
+       as a last-resort safety net.
+  All hooks are fully non-blocking, fault-tolerant (never crash the agent on error),
+  and leave recent context 100% intact.
+author: pranshxc

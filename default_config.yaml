@@ -1,0 +1,29 @@
+# ─── _a0_context_guard  default configuration ────────────────────────────────
+#
+# All values can be overridden by environment variables with the prefix CTX_GUARD_.
+# Example:  CTX_GUARD_MAX_RESULT_CHARS=5000
+#
+# max characters allowed for a single tool result before it is truncated.
+# ~750 tokens at 4 chars/token.  Raise if tools produce large structured outputs
+# you need to keep intact (e.g. JSON payloads).  Minimum: 500.
+max_result_chars: 4000
+
+# number of recent tool-result messages to preserve verbatim in history.
+# older ones are kept summarised by A0's native compression pipeline.
+keep_recent_results: 8
+
+# fraction of the model's ctx_length that triggers the NATIVE compression pass.
+# A0 already uses ctx_history (default 0.70) as its own budget; we apply native
+# compress() slightly before that so the agent never actually hits the limit.
+# value is a multiplier on top of ctx_history budget (0 < value <= 1.0).
+native_compress_ratio: 0.85
+
+# token threshold (absolute) above which the last-resort full LLM summarisation
+# is triggered via _chat_compaction (if installed).  0 = disabled.
+hard_compact_threshold: 75000
+
+# use the utility model (cheaper/faster) for the hard compact fallback.
+hard_compact_use_utility: true
+
+# set to false to disable the plugin entirely without uninstalling it.
+enabled: true
