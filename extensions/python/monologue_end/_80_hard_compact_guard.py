@@ -1,146 +1,78 @@
 """
 monologue_end -> _80_hard_compact_guard
 
-Fires after a complete agent monologue. Last-resort safety ceiling.
-Self-contained: all logic inlined, no cross-file imports.
+Fires after every complete monologue.
+Hard ceiling: if still over threshold after loop-level compress, force compact.
+Self-contained, zero cross-file imports.
 """
 from __future__ import annotations
 import os
 from helpers.extension import Extension
 from agent import LoopData
 
-_FLAG = "_ctx_guard_hc_done"
+HARD_THRESHOLD = int(os.environ.get("CTX_GUARD_HARD_THRESHOLD", "100000"))
+ENABLED        = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0", "false", "no")
+_FLAG          = "_ctxguard_hard_done"
 
-# ── inline config ─────────────────────────────────────────────────────────────
-def _cfg(key: str, default):
-    val = os.environ.get(f"CTX_GUARD_{key.upper()}")
-    if val is None:
-        return default
-    try:
-        if isinstance(default, bool):  return val.lower() in ("1", "true", "yes")
-        if isinstance(default, int):   return int(val)
-        if isinstance(default, float): return float(val)
-    except (ValueError, TypeError):
-        pass
-    return val
 
-# ── inline token utils ────────────────────────────────────────────────────────
-def _history_tokens(agent) -> int:
+def _count_tokens(agent) -> int:
     try:
-        return agent.history.get_tokens()
+        t = agent.history.get_tokens()
+        if t and t > 0: return t
+    except Exception: pass
+    try:
+        from helpers import tokens
+        from helpers.history import output_text
+        text = output_text(agent.history.output())
+        if text: return tokens.approximate_tokens(text)
+    except Exception: pass
+    try:
+        return sum(len(str(m)) for m in agent.history.output()) // 4
     except Exception:
-        try:
-            from helpers import tokens
-            from helpers.history import output_text
-            return tokens.approximate_tokens(output_text(agent.history.output()))
-        except Exception:
-            return 0
+        return 0
 
-# ── extension ─────────────────────────────────────────────────────────────────
+
 class HardCompactGuard(Extension):
 
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
-        if not self.agent:
+        if not ENABLED or not self.agent or self.agent.number != 0:
             return
-        if self.agent.number != 0:   # root agent only
-            return
-
         try:
-            if not _cfg("enabled", True):
-                return
-
-            threshold = int(_cfg("hard_compact_threshold", 75000))
-            if threshold <= 0:
-                return
-
             context = self.agent.context
             if getattr(context, _FLAG, False):
-                return  # already ran this monologue
+                return
 
-            current = _history_tokens(self.agent)
-            if current <= threshold:
+            current = _count_tokens(self.agent)
+            if current <= HARD_THRESHOLD:
                 return
 
             setattr(context, _FLAG, True)
 
             log_item = context.log.log(
                 type="hint",
-                heading="\U0001f5dc Context Guard \u2014 Full Compact",
+                heading="🗜 Context Guard — Hard Ceiling Hit",
                 content=(
-                    f"History reached {current:,} tokens (threshold {threshold:,}). "
-                    "Running full LLM summarisation\u2026"
+                    f"Tokens: {current:,} > hard limit {HARD_THRESHOLD:,}. "
+                    "Forcing full compaction…"
                 ),
             )
 
-            use_utility = bool(_cfg("hard_compact_use_utility", True))
-
-            # attempt _chat_compaction plugin first
             try:
                 from plugins._chat_compaction.helpers.compactor import run_compaction
-                await run_compaction(context, use_chat_model=not use_utility)
-                after = _history_tokens(self.agent)
+                await run_compaction(context, use_chat_model=False)
+                after = _count_tokens(self.agent)
                 log_item.update(
-                    content=(
-                        f"Full compact done: {current:,} \u2192 {after:,} tokens. "
-                        "Context preserved in summary."
-                    )
+                    content=f"Hard compact done: {current:,} → {after:,} tokens."
                 )
-                return
             except ImportError:
-                pass
+                log_item.update(content="_chat_compaction not installed. Install it for full compact support.")
             except Exception as e:
-                log_item.update(content=f"_chat_compaction failed ({e}). Trying fallback\u2026")
+                log_item.update(content=f"Hard compact failed: {e}")
 
-            # local fallback
-            await _local_compact(self.agent, log_item)
-
-        except Exception as exc:
-            try:
-                self.agent.context.log.log(
-                    type="hint",
-                    heading="\u26a0 Context Guard \u2014 Hard Compact Error",
-                    content=f"Hard compact skipped: {exc}",
-                )
-            except Exception:
-                pass
+        except Exception:
+            pass
         finally:
             try:
                 setattr(self.agent.context, _FLAG, False)
             except Exception:
                 pass
-
-
-async def _local_compact(agent, log_item) -> None:
-    """Fallback: summarise old Topics via utility model and fold into Bulks."""
-    history    = agent.history
-    old_topics = list(history.topics)
-    if not old_topics:
-        log_item.update(content="No old topics found for local fallback compact.")
-        return
-
-    done = 0
-    for topic in old_topics:
-        if not topic.summary:
-            try:
-                await topic.summarize()
-                done += 1
-            except Exception:
-                pass
-
-    if done > 0:
-        from helpers.history import Bulk
-        bulk = Bulk(history=history)
-        bulk.records = old_topics
-        history.bulks.append(bulk)
-        history.topics = []
-        try:
-            from helpers import persist_chat
-            persist_chat.save_tmp_chat(agent.context)
-        except Exception:
-            pass
-        after = _history_tokens(agent)
-        log_item.update(
-            content=f"Local fallback: summarised {done} topic(s). Tokens now: {after:,}."
-        )
-    else:
-        log_item.update(content="Local fallback: all topics already summarised.")
