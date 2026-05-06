@@ -1,23 +1,20 @@
 """
 monologue_end -> _80_hard_compact_guard
 
-Post-monologue cleanup. Fires after the agent has fully responded and
-all tool calls are complete for that user turn.
-
-Role: persist stats and handle any edge case where token_budget_enforcer
-couldn't fire (e.g. very first huge message, or compress returned False
-repeatedly). Acts as the final safety net.
-
-Self-contained, zero cross-file imports.
+Post-monologue cleanup. Fires after the agent has fully responded.
+Only triggers compaction when history is genuinely over threshold (>50k tokens).
+Does NOT compact on every turn. Stats log is still shown every turn.
 """
 from __future__ import annotations
 import os
 from helpers.extension import Extension
 from agent import LoopData
 
-POST_TURN_TARGET = int(os.environ.get("CTX_GUARD_POST_TURN_TARGET", "40000"))  # aim lower after turn ends
+# Compaction only fires when history exceeds this. Default 50k.
+# Override with: CTX_GUARD_COMPACT_THRESHOLD=60000
+COMPACT_THRESHOLD = int(os.environ.get("CTX_GUARD_COMPACT_THRESHOLD",
+                        os.environ.get("CTX_GUARD_POST_TURN_TARGET", "50000")))
 ENABLED          = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0","false","no")
-_FLAG            = "_ctxguard_post_done"
 
 
 def _history_tokens(agent) -> int:
@@ -26,10 +23,9 @@ def _history_tokens(agent) -> int:
         if t and t > 0: return t
     except Exception: pass
     try:
-        from helpers import tokens
-        from helpers.history import output_text
-        text = output_text(agent.history.output())
-        if text: return tokens.approximate_tokens(text)
+        from helpers import tokens as tok_helper
+        hist_text = agent.history.output_text(human_label="user", ai_label="assistant")
+        if hist_text: return tok_helper.approximate_tokens(hist_text)
     except Exception: pass
     try:
         return sum(len(str(m)) for m in agent.history.output()) // 4
@@ -43,49 +39,44 @@ class HardCompactGuard(Extension):
             return
         try:
             context = self.agent.context
-            if getattr(context, _FLAG, False):
-                return
-            setattr(context, _FLAG, True)
-
             current = _history_tokens(self.agent)
-            # Log stats for every completed turn (useful for monitoring)
-            last_tokens = context.data.get("_ctxguard_last_tokens", current)
+
+            # Always log stats so the user can monitor
             context.log.log(
                 type="hint",
                 heading="📊 Context Guard — Turn Stats",
                 content=(
                     f"Turn complete. History: {current:,} tokens. "
-                    f"Post-turn target: {POST_TURN_TARGET:,}."
+                    f"Compact threshold: {COMPACT_THRESHOLD:,}."
                 ),
             )
 
-            if current <= POST_TURN_TARGET:
-                return  # already healthy
+            # Only compact when genuinely over threshold
+            if current <= COMPACT_THRESHOLD:
+                return
 
-            # Post-turn: use full LLM compaction for best quality
-            # (we have time now, no active agent loop to interrupt)
             log_item = context.log.log(
                 type="hint",
                 heading="🗜 Context Guard — Post-Turn Compact",
                 content=(
-                    f"Post-turn cleanup: {current:,} tokens > target {POST_TURN_TARGET:,}. "
-                    "Running full LLM summarisation now (no active work to interrupt)…"
+                    f"History {current:,} tokens exceeds threshold {COMPACT_THRESHOLD:,}. "
+                    "Running compaction after turn end…"
                 ),
             )
+
             try:
                 from plugins._chat_compaction.helpers.compactor import run_compaction
-                await run_compaction(context, use_chat_model=True)  # use chat model for best summary quality
+                await run_compaction(context, use_chat_model=True)
                 after = _history_tokens(self.agent)
                 log_item.update(
                     content=(
                         f"✅ Post-turn compact: {current:,} → {after:,} tokens "
-                        f"(saved {current-after:,}). "
-                        f"Ready for next user message at {after:,} tokens."
+                        f"(saved {current - after:,})."
                     )
                 )
             except ImportError:
-                # _chat_compaction not installed: use A0 native
-                def _patched(): return POST_TURN_TARGET
+                # Fallback to A0 native compress
+                def _patched(): return COMPACT_THRESHOLD
                 history = self.agent.history
                 orig = history._get_ctx_size_for_history
                 try:
@@ -102,8 +93,3 @@ class HardCompactGuard(Extension):
 
         except Exception:
             pass
-        finally:
-            try:
-                setattr(self.agent.context, _FLAG, False)
-            except Exception:
-                pass
