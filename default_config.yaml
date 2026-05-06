@@ -1,47 +1,70 @@
-# Context Guard — Default Configuration
-# All values overridable via environment variables: CTX_GUARD_<KEY>
+# Context Guard — Configuration
+# All values overridable via environment variables in docker-compose or .env
 #
-# HOW TOKEN BUDGETING WORKS:
-# ┌─────────────────────────────────────────────────────────────────┐
-# │  System + Memories + Skills  ~8-15k  (fixed, not controlled)   │
-# │  History (bulks + topics)    controlled by TARGET_TOKENS        │
-# │  Current work buffer         BUFFER_TOKENS headroom reserved    │
-# │  ─────────────────────────────────────────────────────────────  │
-# │  Effective trigger = TARGET_TOKENS + BUFFER_TOKENS              │
-# │  e.g. 60k + 20k = compress when history > 80k                  │
-# └─────────────────────────────────────────────────────────────────┘
+# TRIGGER = TARGET_TOKENS + BUFFER_TOKENS
+# Compression fires whenever assembled history_output exceeds TRIGGER.
+# After compression, history is brought down to TARGET_TOKENS.
+#
+# To always stay under 50k tokens:
+#   TARGET_TOKENS = 40000  (compress down to 40k)
+#   BUFFER_TOKENS = 10000  (allow 10k of new work before re-firing)
+#   TRIGGER       = 50000  (fires when history > 50k)
+#
+# Diagram:
+#   0k -------- 40k -------- 50k -------- 128k
+#               ^             ^             ^  
+#           compressed     trigger      model max
+#           to here        fires here   (never reached)
 
-# Enable/disable the plugin entirely
 enabled: true
 # env: CTX_GUARD_ENABLED=false
 
-# Target: compress history DOWN to this many tokens
-# Lower = cheaper per-call, but more LLM summarisation calls
-target_tokens: 30000
-# env: CTX_GUARD_TARGET_TOKENS=60000
+# Compress history down to this many tokens.
+# Lower = cheaper per-call billing, but more compression passes.
+target_tokens: 40000
+# env: CTX_GUARD_TARGET_TOKENS=40000
 
-# Buffer: headroom reserved for current agentic work
-# (tool results, new responses queued up in current_topic)
-buffer_tokens: 20000
-# env: CTX_GUARD_BUFFER_TOKENS=20000
+# Headroom for active work (tool results, mid-turn responses accumulating).
+# TRIGGER = target_tokens + buffer_tokens = 50k
+buffer_tokens: 10000
+# env: CTX_GUARD_BUFFER_TOKENS=10000
 
-# Hard floor: never compress below this (protects recent context)
+# Hard floor: never compress below this.
+# Prevents destroying very recent context.
 min_tokens: 8000
 # env: CTX_GUARD_MIN_TOKENS=8000
 
-# Emergency brake: compress immediately if history exceeds this
-# (fires in message_loop_start, before prompt assembly)
-hard_limit: 120000
-# env: CTX_GUARD_HARD_LIMIT=120000
+# Max compression passes per LLM call.
+# A0's compress() is incremental — one pass may not reach target.
+# 5 passes = enough for any realistic history size.
+max_passes: 5
+# env: CTX_GUARD_MAX_PASSES=5
 
-# Post-turn target: after agent fully responds, compact down to this
-# This is the baseline for the NEXT user message
-# Lower = cheaper next-turn input tokens
-post_turn_target: 40000
-# env: CTX_GUARD_POST_TURN_TARGET=40000
+# Emergency brake in message_loop_start (before prompt assembly).
+# Only fires if somehow the history exploded before our hook ran.
+hard_limit: 80000
+# env: CTX_GUARD_HARD_LIMIT=80000
 
-# Max chars per tool result (caps before entering history)
-# Web search, code output etc. are typically 10-50k chars
-# Capped here = never enters history bloated
+# Post-turn target: after agent fully responds, compact down further.
+# This is the baseline for the NEXT user message — lower = cheaper next turn.
+post_turn_target: 30000
+# env: CTX_GUARD_POST_TURN_TARGET=30000
+
+# Max chars per tool result before it enters history.
+# Web search / code output etc. are typically 10k-50k chars.
+# Capping here is the single most effective cost reduction.
 max_result_chars: 4000
 # env: CTX_GUARD_MAX_RESULT_CHARS=4000
+
+# ────────────────────────────────────────────────────────────────────────────
+# Quick reference: env vars you can set in docker-compose.yml
+# ────────────────────────────────────────────────────────────────────────────
+#
+# environment:
+#   - CTX_GUARD_TARGET_TOKENS=40000
+#   - CTX_GUARD_BUFFER_TOKENS=10000
+#   - CTX_GUARD_POST_TURN_TARGET=30000
+#   - CTX_GUARD_MAX_RESULT_CHARS=4000
+#   - CTX_GUARD_MAX_PASSES=5
+#   - CTX_GUARD_HARD_LIMIT=80000
+#   - CTX_GUARD_ENABLED=true
