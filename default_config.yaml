@@ -1,29 +1,47 @@
-# ─── _a0_context_guard  default configuration ────────────────────────────────
+# Context Guard — Default Configuration
+# All values overridable via environment variables: CTX_GUARD_<KEY>
 #
-# All values can be overridden by environment variables with the prefix CTX_GUARD_.
-# Example:  CTX_GUARD_MAX_RESULT_CHARS=5000
-#
-# max characters allowed for a single tool result before it is truncated.
-# ~750 tokens at 4 chars/token.  Raise if tools produce large structured outputs
-# you need to keep intact (e.g. JSON payloads).  Minimum: 500.
-max_result_chars: 4000
+# HOW TOKEN BUDGETING WORKS:
+# ┌─────────────────────────────────────────────────────────────────┐
+# │  System + Memories + Skills  ~8-15k  (fixed, not controlled)   │
+# │  History (bulks + topics)    controlled by TARGET_TOKENS        │
+# │  Current work buffer         BUFFER_TOKENS headroom reserved    │
+# │  ─────────────────────────────────────────────────────────────  │
+# │  Effective trigger = TARGET_TOKENS + BUFFER_TOKENS              │
+# │  e.g. 60k + 20k = compress when history > 80k                  │
+# └─────────────────────────────────────────────────────────────────┘
 
-# number of recent tool-result messages to preserve verbatim in history.
-# older ones are kept summarised by A0's native compression pipeline.
-keep_recent_results: 8
-
-# fraction of the model's ctx_length that triggers the NATIVE compression pass.
-# A0 already uses ctx_history (default 0.70) as its own budget; we apply native
-# compress() slightly before that so the agent never actually hits the limit.
-# value is a multiplier on top of ctx_history budget (0 < value <= 1.0).
-native_compress_ratio: 0.85
-
-# token threshold (absolute) above which the last-resort full LLM summarisation
-# is triggered via _chat_compaction (if installed).  0 = disabled.
-hard_compact_threshold: 75000
-
-# use the utility model (cheaper/faster) for the hard compact fallback.
-hard_compact_use_utility: true
-
-# set to false to disable the plugin entirely without uninstalling it.
+# Enable/disable the plugin entirely
 enabled: true
+# env: CTX_GUARD_ENABLED=false
+
+# Target: compress history DOWN to this many tokens
+# Lower = cheaper per-call, but more LLM summarisation calls
+target_tokens: 60000
+# env: CTX_GUARD_TARGET_TOKENS=60000
+
+# Buffer: headroom reserved for current agentic work
+# (tool results, new responses queued up in current_topic)
+buffer_tokens: 20000
+# env: CTX_GUARD_BUFFER_TOKENS=20000
+
+# Hard floor: never compress below this (protects recent context)
+min_tokens: 8000
+# env: CTX_GUARD_MIN_TOKENS=8000
+
+# Emergency brake: compress immediately if history exceeds this
+# (fires in message_loop_start, before prompt assembly)
+hard_limit: 120000
+# env: CTX_GUARD_HARD_LIMIT=120000
+
+# Post-turn target: after agent fully responds, compact down to this
+# This is the baseline for the NEXT user message
+# Lower = cheaper next-turn input tokens
+post_turn_target: 40000
+# env: CTX_GUARD_POST_TURN_TARGET=40000
+
+# Max chars per tool result (caps before entering history)
+# Web search, code output etc. are typically 10-50k chars
+# Capped here = never enters history bloated
+max_result_chars: 4000
+# env: CTX_GUARD_MAX_RESULT_CHARS=4000
