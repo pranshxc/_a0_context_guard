@@ -17,7 +17,7 @@ enabled: true
 
 # Target: compress history DOWN to this many tokens
 # Lower = cheaper per-call, but more LLM summarisation calls
-target_tokens: 60000
+target_tokens: 30000
 # env: CTX_GUARD_TARGET_TOKENS=60000
 
 # Buffer: headroom reserved for current agentic work
