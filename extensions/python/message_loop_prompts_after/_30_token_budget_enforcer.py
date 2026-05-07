@@ -1,40 +1,42 @@
 """
 message_loop_prompts_after -> _30_token_budget_enforcer
 
-Fires before EVERY LLM call (mid-turn, during active agent work).
+Fires after prompt assembly, before each LLM call.
+Reads ALL thresholds from helpers/config.py -> default_config.yaml.
 
-CRITICAL RULE: NEVER call run_compaction() (full LLM "Context compacted")
-from this hook. That wipes history + log mid-task, producing the
-"Context compacted" message as the final response.
+RULE: NEVER call run_compaction(). Native history.compress() only.
 
-This hook ONLY uses A0's native history.compress() which is a lightweight
-incremental summariser that does NOT wipe the log or show a final response.
-
-Full LLM compaction (run_compaction) is only permitted in monologue_end
-(_80_hard_compact_guard.py) which fires AFTER the agent has finished.
-Post-turn compaction is DISABLED by default (CTX_GUARD_POST_TURN_COMPACT_ENABLED=false).
-
-Config env vars:
-  CTX_GUARD_TARGET_TOKENS  default 40000  compress history to this target
-  CTX_GUARD_BUFFER_TOKENS  default 10000  headroom -> trigger = target+buffer = 50000
-  CTX_GUARD_MIN_TOKENS     default 8000   floor for compress target
-  CTX_GUARD_MAX_PASSES     default 5      max native compress passes per call
-  CTX_GUARD_ENABLED        default true
-
-Effective defaults:
-  Compress to : 40,000 tokens
-  Trigger at  : 50,000 tokens  (40k + 10k)
-  Max passes  : 5 per call
+Defaults (from default_config.yaml):
+  TARGET_TOKENS = 40,000  compress to here
+  BUFFER_TOKENS = 10,000  headroom
+  TRIGGER       = 50,000  fires when history > 50k
+  MAX_PASSES    = 5
 """
 from __future__ import annotations
 import os
+import sys
 from helpers.extension import Extension
 from agent import LoopData
 
-TARGET_TOKENS = int(os.environ.get("CTX_GUARD_TARGET_TOKENS", "40000"))
-BUFFER_TOKENS = int(os.environ.get("CTX_GUARD_BUFFER_TOKENS", "10000"))
-MIN_TOKENS    = int(os.environ.get("CTX_GUARD_MIN_TOKENS",    "8000"))
-MAX_PASSES    = int(os.environ.get("CTX_GUARD_MAX_PASSES",    "5"))
+
+def _cfg(key: str, default: int) -> int:
+    try:
+        plugin_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+        sys.path.insert(0, os.path.abspath(plugin_dir))
+        from plugins._a0_context_guard.helpers.config import get
+        return int(get(key, default))
+    except Exception:
+        pass
+    try:
+        return int(os.environ.get(f"CTX_GUARD_{key.upper()}", str(default)))
+    except Exception:
+        return default
+
+
+TARGET_TOKENS = _cfg("target_tokens", 40000)
+BUFFER_TOKENS = _cfg("buffer_tokens", 10000)
+MIN_TOKENS    = _cfg("min_tokens",    8000)
+MAX_PASSES    = _cfg("max_passes",    5)
 ENABLED       = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0", "false", "no")
 
 
@@ -75,7 +77,6 @@ def _history_tokens(agent) -> int:
 
 
 async def _compress_to_target(agent, target: int) -> bool:
-    """Monkey-patch compress target and run A0 native compress."""
     history = agent.history
     original = history._get_ctx_size_for_history
     def _patched(): return target
@@ -105,14 +106,13 @@ class TokenBudgetEnforcer(Extension):
             if hist_tokens == 0:
                 hist_tokens = _history_tokens(agent)
 
-            trigger = TARGET_TOKENS + BUFFER_TOKENS  # default 50k
+            trigger = TARGET_TOKENS + BUFFER_TOKENS  # 50k default
 
             context.data["_ctxguard_last_tokens"] = hist_tokens
 
             if hist_tokens <= trigger:
-                return  # under budget, nothing to do
+                return
 
-            # Don't re-compress the exact same assembled prompt twice
             last_compressed = context.data.get("_ctxguard_last_compressed_call", -1)
             if call_count == last_compressed:
                 return
@@ -139,7 +139,7 @@ class TokenBudgetEnforcer(Extension):
                 loop_data.history_output = agent.history.output()
                 new_tokens = _tokens_from_output(loop_data.history_output)
                 if new_tokens >= current:
-                    break  # no progress
+                    break
                 current = new_tokens
                 if compressed:
                     any_progress = True
@@ -159,7 +159,7 @@ class TokenBudgetEnforcer(Extension):
                 log_item.update(
                     content=(
                         f"⚠️ Native compress made no progress at {current:,} tokens. "
-                        "Full compaction deferred to end of turn — continuing work."
+                        "Continuing work — full compaction disabled."
                     )
                 )
 
