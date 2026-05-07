@@ -1,20 +1,30 @@
 """
 monologue_end -> _80_hard_compact_guard
 
-Post-monologue cleanup. Fires after the agent has fully responded.
-Only triggers compaction when history is genuinely over threshold (>50k tokens).
-Does NOT compact on every turn. Stats log is still shown every turn.
+Post-monologue stats + optional cleanup. Fires after the agent has fully responded.
+
+Post-turn compaction is DISABLED by default.
+The mid-turn token budget enforcer (_30_token_budget_enforcer.py) handles
+all compression while the agent is working. Running full LLM compaction after
+the final response produces a "Context compacted" message that interrupts the
+chat flow and confuses the user.
+
+Enable post-turn compaction only if you explicitly want it:
+  CTX_GUARD_POST_TURN_COMPACT_ENABLED=true
+
+Config env vars:
+  CTX_GUARD_POST_TURN_COMPACT_ENABLED  default false   enable/disable post-turn compact
+  CTX_GUARD_POST_TURN_TARGET           default 30000   compact to this after turn ends
+  CTX_GUARD_ENABLED                    default true
 """
 from __future__ import annotations
 import os
 from helpers.extension import Extension
 from agent import LoopData
 
-# Compaction only fires when history exceeds this. Default 50k.
-# Override with: CTX_GUARD_COMPACT_THRESHOLD=60000
-COMPACT_THRESHOLD = int(os.environ.get("CTX_GUARD_COMPACT_THRESHOLD",
-                        os.environ.get("CTX_GUARD_POST_TURN_TARGET", "50000")))
-ENABLED          = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0","false","no")
+ENABLED          = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0", "false", "no")
+POST_TURN_ON     = os.environ.get("CTX_GUARD_POST_TURN_COMPACT_ENABLED", "false").lower() in ("1", "true", "yes")
+POST_TURN_TARGET = int(os.environ.get("CTX_GUARD_POST_TURN_TARGET", "30000"))
 
 
 def _history_tokens(agent) -> int:
@@ -24,7 +34,8 @@ def _history_tokens(agent) -> int:
     except Exception: pass
     try:
         from helpers import tokens as tok_helper
-        hist_text = agent.history.output_text(human_label="user", ai_label="assistant")
+        from helpers.history import output_text
+        hist_text = output_text(agent.history.output())
         if hist_text: return tok_helper.approximate_tokens(hist_text)
     except Exception: pass
     try:
@@ -41,25 +52,30 @@ class HardCompactGuard(Extension):
             context = self.agent.context
             current = _history_tokens(self.agent)
 
-            # Always log stats so the user can monitor
+            # Always log stats so the user can monitor context health
+            post_status = "enabled" if POST_TURN_ON else "disabled"
             context.log.log(
                 type="hint",
                 heading="📊 Context Guard — Turn Stats",
                 content=(
                     f"Turn complete. History: {current:,} tokens. "
-                    f"Compact threshold: {COMPACT_THRESHOLD:,}."
+                    f"Post-turn compaction: {post_status} "
+                    f"(target: {POST_TURN_TARGET:,} if enabled)."
                 ),
             )
 
-            # Only compact when genuinely over threshold
-            if current <= COMPACT_THRESHOLD:
+            # Post-turn compaction is OFF by default — skip unless explicitly enabled
+            if not POST_TURN_ON:
+                return
+
+            if current <= POST_TURN_TARGET:
                 return
 
             log_item = context.log.log(
                 type="hint",
-                heading="🗜 Context Guard — Post-Turn Compact",
+                heading="🗃 Context Guard — Post-Turn Compact",
                 content=(
-                    f"History {current:,} tokens exceeds threshold {COMPACT_THRESHOLD:,}. "
+                    f"History {current:,} tokens exceeds post-turn target {POST_TURN_TARGET:,}. "
                     "Running compaction after turn end…"
                 ),
             )
@@ -75,8 +91,7 @@ class HardCompactGuard(Extension):
                     )
                 )
             except ImportError:
-                # Fallback to A0 native compress
-                def _patched(): return COMPACT_THRESHOLD
+                def _patched(): return POST_TURN_TARGET
                 history = self.agent.history
                 orig = history._get_ctx_size_for_history
                 try:

@@ -11,30 +11,30 @@ This hook ONLY uses A0's native history.compress() which is a lightweight
 incremental summariser that does NOT wipe the log or show a final response.
 
 Full LLM compaction (run_compaction) is only permitted in monologue_end
-(_80_hard_compact_guard.py) which fires AFTER the agent has finished and
-the user is already waiting for the next message.
+(_80_hard_compact_guard.py) which fires AFTER the agent has finished.
+Post-turn compaction is DISABLED by default (CTX_GUARD_POST_TURN_COMPACT_ENABLED=false).
 
 Config env vars:
-  CTX_GUARD_TARGET_TOKENS  default 60000  compress history to this target
-  CTX_GUARD_BUFFER_TOKENS  default 20000  headroom -> trigger = target+buffer = 80000
+  CTX_GUARD_TARGET_TOKENS  default 40000  compress history to this target
+  CTX_GUARD_BUFFER_TOKENS  default 10000  headroom -> trigger = target+buffer = 50000
   CTX_GUARD_MIN_TOKENS     default 8000   floor for compress target
-  CTX_GUARD_MAX_PASSES     default 1      max native compress passes per call
+  CTX_GUARD_MAX_PASSES     default 5      max native compress passes per call
   CTX_GUARD_ENABLED        default true
 
 Effective defaults:
-  Compress to : 60,000 tokens
-  Trigger at  : 80,000 tokens  (60k + 20k)
-  Max passes  : 1 per call (avoids over-compressing mid-turn)
+  Compress to : 40,000 tokens
+  Trigger at  : 50,000 tokens  (40k + 10k)
+  Max passes  : 5 per call
 """
 from __future__ import annotations
 import os
 from helpers.extension import Extension
 from agent import LoopData
 
-TARGET_TOKENS = int(os.environ.get("CTX_GUARD_TARGET_TOKENS", "60000"))
-BUFFER_TOKENS = int(os.environ.get("CTX_GUARD_BUFFER_TOKENS", "20000"))
+TARGET_TOKENS = int(os.environ.get("CTX_GUARD_TARGET_TOKENS", "40000"))
+BUFFER_TOKENS = int(os.environ.get("CTX_GUARD_BUFFER_TOKENS", "10000"))
 MIN_TOKENS    = int(os.environ.get("CTX_GUARD_MIN_TOKENS",    "8000"))
-MAX_PASSES    = int(os.environ.get("CTX_GUARD_MAX_PASSES",    "1"))
+MAX_PASSES    = int(os.environ.get("CTX_GUARD_MAX_PASSES",    "5"))
 ENABLED       = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0", "false", "no")
 
 
@@ -105,7 +105,7 @@ class TokenBudgetEnforcer(Extension):
             if hist_tokens == 0:
                 hist_tokens = _history_tokens(agent)
 
-            trigger = TARGET_TOKENS + BUFFER_TOKENS  # default 80k
+            trigger = TARGET_TOKENS + BUFFER_TOKENS  # default 50k
 
             context.data["_ctxguard_last_tokens"] = hist_tokens
 
