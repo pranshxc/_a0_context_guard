@@ -1,9 +1,9 @@
 """
 Lightweight token utilities for _a0_context_guard.
-Uses A0's own history.get_tokens() / helpers.tokens so estimates stay
-consistent with what the rest of the framework reports.
 
-Imported as: from plugins._a0_context_guard.helpers.token_utils import ...
+CRITICAL: agent.history.get_tokens() returns the ALLOCATED BUDGET
+(e.g. 128000 * 0.70 = 89600), NOT the actual current token usage.
+Always count from output_text(history.output()) instead.
 """
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -13,17 +13,23 @@ if TYPE_CHECKING:
 
 
 def history_token_count(agent: "Agent") -> int:
-    """Return approximate token count of the agent's full history."""
+    """Return actual token count of current history content."""
+    # Method 1: count from serialised output text (most accurate)
     try:
-        return agent.history.get_tokens()
-    except Exception:
-        try:
-            from helpers import tokens
-            from helpers.history import output_text
-            text = output_text(agent.history.output())
+        from helpers import tokens
+        from helpers.history import output_text
+        text = output_text(agent.history.output())
+        if text:
             return tokens.approximate_tokens(text)
-        except Exception:
-            return 0
+    except Exception:
+        pass
+    # Method 2: char-based fallback (~4 chars per token)
+    try:
+        text = " ".join(str(m) for m in agent.history.output())
+        return max(1, len(text) // 4)
+    except Exception:
+        pass
+    return 0
 
 
 def ctx_budget_tokens(agent: "Agent") -> int:
@@ -35,4 +41,4 @@ def ctx_budget_tokens(agent: "Agent") -> int:
         ctx_history = float(cfg.get("ctx_history", 0.70))
         return int(ctx_length * ctx_history)
     except Exception:
-        return 89600  # 128 000 * 0.70 safe fallback
+        return 89600

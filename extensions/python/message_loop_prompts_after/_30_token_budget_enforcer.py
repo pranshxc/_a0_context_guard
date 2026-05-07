@@ -2,9 +2,11 @@
 message_loop_prompts_after -> _30_token_budget_enforcer
 
 Fires after prompt assembly, before each LLM call.
-Native compress only — NEVER calls run_compaction().
+Native compress only — never calls run_compaction().
+Trigger: 50k tokens. Compress to: 40k tokens.
 
-Triggers at 50k (TARGET 40k + BUFFER 10k). Compresses back down to 40k.
+NOTE: Uses output_text+approximate_tokens for ACTUAL usage count.
+      Do NOT use history.get_tokens() — it returns allocated budget, not usage.
 """
 from __future__ import annotations
 import os
@@ -16,30 +18,10 @@ BUFFER_TOKENS = int(os.environ.get("CTX_GUARD_BUFFER_TOKENS", "10000"))
 MIN_TOKENS    = int(os.environ.get("CTX_GUARD_MIN_TOKENS",    "8000"))
 MAX_PASSES    = int(os.environ.get("CTX_GUARD_MAX_PASSES",    "5"))
 ENABLED       = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0", "false", "no")
+TRIGGER       = TARGET_TOKENS + BUFFER_TOKENS  # 50000
 
 
-def _tokens_from_output(history_output: list) -> int:
-    try:
-        from helpers import tokens
-        from helpers.history import output_text
-        text = output_text(history_output)
-        if text:
-            return tokens.approximate_tokens(text)
-    except Exception:
-        pass
-    try:
-        return sum(len(str(m)) for m in history_output) // 4
-    except Exception:
-        return 0
-
-
-def _history_tokens(agent) -> int:
-    try:
-        t = agent.history.get_tokens()
-        if t and t > 0:
-            return t
-    except Exception:
-        pass
+def _count_tokens(agent) -> int:
     try:
         from helpers import tokens
         from helpers.history import output_text
@@ -49,103 +31,80 @@ def _history_tokens(agent) -> int:
     except Exception:
         pass
     try:
-        return sum(len(str(m)) for m in agent.history.output()) // 4
+        return max(1, len(" ".join(str(m) for m in agent.history.output())) // 4)
     except Exception:
         return 0
 
 
-async def _compress_to_target(agent, target: int) -> bool:
-    history = agent.history
+async def _compress_to(agent, target: int, max_passes: int) -> int:
+    history  = agent.history
     original = history._get_ctx_size_for_history
     def _patched(): return target
+    current  = _count_tokens(agent)
+    passes   = 0
     try:
         history._get_ctx_size_for_history = _patched
-        return await history.compress()
+        while current > target and passes < max_passes:
+            ok = await history.compress()
+            passes += 1
+            new = _count_tokens(agent)
+            if new >= current or not ok:
+                break
+            current = new
     finally:
         history._get_ctx_size_for_history = original
+    return current
 
 
 class TokenBudgetEnforcer(Extension):
-
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
-        if not ENABLED or not self.agent:
+        if not ENABLED or not self.agent or self.agent.number != 0:
             return
-        if self.agent.number != 0:
-            return
-
         try:
-            agent   = self.agent
-            context = agent.context
-
+            agent      = self.agent
+            context    = agent.context
             call_count = context.data.get("_ctxguard_call_count", 0) + 1
             context.data["_ctxguard_call_count"] = call_count
 
-            hist_tokens = _tokens_from_output(loop_data.history_output)
-            if hist_tokens == 0:
-                hist_tokens = _history_tokens(agent)
+            current = _count_tokens(agent)
+            context.data["_ctxguard_last_tokens"] = current
 
-            trigger = TARGET_TOKENS + BUFFER_TOKENS  # 50k
-            context.data["_ctxguard_last_tokens"] = hist_tokens
-
-            if hist_tokens <= trigger:
+            if current <= TRIGGER:
                 return
 
-            last_compressed = context.data.get("_ctxguard_last_compressed_call", -1)
-            if call_count == last_compressed:
+            # Deduplicate: don't compress twice on same call
+            if context.data.get("_ctxguard_last_compressed_call") == call_count:
                 return
             context.data["_ctxguard_last_compressed_call"] = call_count
 
             compress_target = max(MIN_TOKENS, TARGET_TOKENS)
-
             log_item = context.log.log(
                 type="hint",
                 heading="🗃 Context Guard — Compressing",
                 content=(
-                    f"History: {hist_tokens:,} tokens > {trigger:,} trigger. "
-                    f"Native compress to ≤{compress_target:,}… (call #{call_count})"
+                    f"History {current:,} > {TRIGGER:,}. "
+                    f"Compressing to ≤{compress_target:,}… (call #{call_count})"
                 ),
             )
-
-            passes       = 0
-            current      = hist_tokens
-            any_progress = False
-
-            while current > trigger and passes < MAX_PASSES:
-                compressed = await _compress_to_target(agent, compress_target)
-                passes += 1
-                loop_data.history_output = agent.history.output()
-                new_tokens = _tokens_from_output(loop_data.history_output)
-                if new_tokens >= current:
-                    break
-                current = new_tokens
-                if compressed:
-                    any_progress = True
-                if current <= trigger:
-                    break
-
-            if any_progress:
-                saved = hist_tokens - current
+            after = await _compress_to(agent, compress_target, MAX_PASSES)
+            saved = current - after
+            if saved > 0:
                 log_item.update(
                     content=(
-                        f"✅ {hist_tokens:,} → {current:,} tokens "
-                        f"(saved {saved:,} in {passes} pass{'es' if passes > 1 else ''}). "
-                        f"Under {trigger:,} limit."
+                        f"✅ {current:,} → {after:,} tokens "
+                        f"(saved {saved:,}). Under {TRIGGER:,}."
                     )
                 )
             else:
                 log_item.update(
-                    content=(
-                        f"⚠️ Native compress made no progress at {current:,} tokens. "
-                        "Continuing work."
-                    )
+                    content=f"⚠️ No progress at {current:,} tokens. Continuing."
                 )
-
-        except Exception as exc:
+        except Exception as e:
             try:
                 self.agent.context.log.log(
                     type="hint",
                     heading="⚠ Context Guard — Error",
-                    content=f"Token budget enforcer: {exc}",
+                    content=f"TokenBudgetEnforcer: {e}",
                 )
             except Exception:
                 pass
