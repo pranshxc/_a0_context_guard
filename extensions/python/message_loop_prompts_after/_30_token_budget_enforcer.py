@@ -2,41 +2,19 @@
 message_loop_prompts_after -> _30_token_budget_enforcer
 
 Fires after prompt assembly, before each LLM call.
-Reads ALL thresholds from helpers/config.py -> default_config.yaml.
+Native compress only — NEVER calls run_compaction().
 
-RULE: NEVER call run_compaction(). Native history.compress() only.
-
-Defaults (from default_config.yaml):
-  TARGET_TOKENS = 40,000  compress to here
-  BUFFER_TOKENS = 10,000  headroom
-  TRIGGER       = 50,000  fires when history > 50k
-  MAX_PASSES    = 5
+Triggers at 50k (TARGET 40k + BUFFER 10k). Compresses back down to 40k.
 """
 from __future__ import annotations
 import os
-import sys
 from helpers.extension import Extension
 from agent import LoopData
 
-
-def _cfg(key: str, default: int) -> int:
-    try:
-        plugin_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
-        sys.path.insert(0, os.path.abspath(plugin_dir))
-        from plugins._a0_context_guard.helpers.config import get
-        return int(get(key, default))
-    except Exception:
-        pass
-    try:
-        return int(os.environ.get(f"CTX_GUARD_{key.upper()}", str(default)))
-    except Exception:
-        return default
-
-
-TARGET_TOKENS = _cfg("target_tokens", 40000)
-BUFFER_TOKENS = _cfg("buffer_tokens", 10000)
-MIN_TOKENS    = _cfg("min_tokens",    8000)
-MAX_PASSES    = _cfg("max_passes",    5)
+TARGET_TOKENS = int(os.environ.get("CTX_GUARD_TARGET_TOKENS", "40000"))
+BUFFER_TOKENS = int(os.environ.get("CTX_GUARD_BUFFER_TOKENS", "10000"))
+MIN_TOKENS    = int(os.environ.get("CTX_GUARD_MIN_TOKENS",    "8000"))
+MAX_PASSES    = int(os.environ.get("CTX_GUARD_MAX_PASSES",    "5"))
 ENABLED       = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0", "false", "no")
 
 
@@ -106,8 +84,7 @@ class TokenBudgetEnforcer(Extension):
             if hist_tokens == 0:
                 hist_tokens = _history_tokens(agent)
 
-            trigger = TARGET_TOKENS + BUFFER_TOKENS  # 50k default
-
+            trigger = TARGET_TOKENS + BUFFER_TOKENS  # 50k
             context.data["_ctxguard_last_tokens"] = hist_tokens
 
             if hist_tokens <= trigger:
@@ -159,7 +136,7 @@ class TokenBudgetEnforcer(Extension):
                 log_item.update(
                     content=(
                         f"⚠️ Native compress made no progress at {current:,} tokens. "
-                        "Continuing work — full compaction disabled."
+                        "Continuing work."
                     )
                 )
 
