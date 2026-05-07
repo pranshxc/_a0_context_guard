@@ -15,21 +15,26 @@ Full LLM compaction (run_compaction) is only permitted in monologue_end
 the user is already waiting for the next message.
 
 Config env vars:
-  CTX_GUARD_TARGET_TOKENS  default 40000  compress history to this
-  CTX_GUARD_BUFFER_TOKENS  default 10000  headroom -> trigger = target+buffer
+  CTX_GUARD_TARGET_TOKENS  default 60000  compress history to this target
+  CTX_GUARD_BUFFER_TOKENS  default 20000  headroom -> trigger = target+buffer = 80000
   CTX_GUARD_MIN_TOKENS     default 8000   floor for compress target
-  CTX_GUARD_MAX_PASSES     default 5      max native compress passes per call
+  CTX_GUARD_MAX_PASSES     default 1      max native compress passes per call
   CTX_GUARD_ENABLED        default true
+
+Effective defaults:
+  Compress to : 60,000 tokens
+  Trigger at  : 80,000 tokens  (60k + 20k)
+  Max passes  : 1 per call (avoids over-compressing mid-turn)
 """
 from __future__ import annotations
 import os
 from helpers.extension import Extension
 from agent import LoopData
 
-TARGET_TOKENS = int(os.environ.get("CTX_GUARD_TARGET_TOKENS", "40000"))
-BUFFER_TOKENS = int(os.environ.get("CTX_GUARD_BUFFER_TOKENS", "10000"))
+TARGET_TOKENS = int(os.environ.get("CTX_GUARD_TARGET_TOKENS", "60000"))
+BUFFER_TOKENS = int(os.environ.get("CTX_GUARD_BUFFER_TOKENS", "20000"))
 MIN_TOKENS    = int(os.environ.get("CTX_GUARD_MIN_TOKENS",    "8000"))
-MAX_PASSES    = int(os.environ.get("CTX_GUARD_MAX_PASSES",    "5"))
+MAX_PASSES    = int(os.environ.get("CTX_GUARD_MAX_PASSES",    "1"))
 ENABLED       = os.environ.get("CTX_GUARD_ENABLED", "true").lower() not in ("0", "false", "no")
 
 
@@ -100,7 +105,7 @@ class TokenBudgetEnforcer(Extension):
             if hist_tokens == 0:
                 hist_tokens = _history_tokens(agent)
 
-            trigger = TARGET_TOKENS + BUFFER_TOKENS  # default 50k
+            trigger = TARGET_TOKENS + BUFFER_TOKENS  # default 80k
 
             context.data["_ctxguard_last_tokens"] = hist_tokens
 
@@ -117,7 +122,7 @@ class TokenBudgetEnforcer(Extension):
 
             log_item = context.log.log(
                 type="hint",
-                heading="🗜 Context Guard — Compressing",
+                heading="🗃 Context Guard — Compressing",
                 content=(
                     f"History: {hist_tokens:,} tokens > {trigger:,} trigger. "
                     f"Native compress to ≤{compress_target:,}… (call #{call_count})"
@@ -151,11 +156,6 @@ class TokenBudgetEnforcer(Extension):
                     )
                 )
             else:
-                # Native compress made no progress.
-                # DO NOT call run_compaction() here — that would wipe history
-                # mid-task and show 'Context compacted' as the final response.
-                # monologue_end/_80_hard_compact_guard.py will handle full
-                # compaction AFTER the turn is complete.
                 log_item.update(
                     content=(
                         f"⚠️ Native compress made no progress at {current:,} tokens. "
